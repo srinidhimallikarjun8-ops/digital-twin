@@ -1,0 +1,16 @@
+{
+  "saved_at": "2026-06-28T14:07:11.942235+00:00",
+  "random_seed": 42,
+  "model_features": [
+    "temperature",
+    "relative_humidity"
+  ],
+  "comfort_classes": [
+    "too_cool",
+    "comfortable",
+    "too_warm"
+  ],
+  "human_label_weight": 10.0,
+  "n_synthetic": 1355,
+  "n_human_labels": 1
+}

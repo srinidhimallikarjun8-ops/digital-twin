@@ -1,0 +1,16 @@
+{
+  "total_rows_raw": 182809,
+  "total_rows_temp_rh": 109081,
+  "rows_dropped_missing_value": 2,
+  "date_range_start": "2026-01-16 19:41:36.746000-03:00",
+  "date_range_end": "2026-01-19 07:24:23.591000-03:00",
+  "date_range_span": "2 days 11:42:46.845000",
+  "n_environments": 4,
+  "n_devices": 11,
+  "device_types_present": [
+    1,
+    2,
+    10,
+    11
+  ]
+}
