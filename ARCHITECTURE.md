@@ -1,13 +1,21 @@
 # System Architecture (O3)
 
-Proof-of-concept human-in-the-loop decision-support system for thermal comfort in a heritage
-building. This document is the Sprint 2 / Objective **O3** deliverable: it defines the components,
-the data flow, the active-learning uncertainty trigger, and the override / defer / confirm logic.
+Proof-of-concept active-learning system for thermal comfort in a heritage building. This document
+is the Sprint 2 / Objective **O3** deliverable: it defines the components, the data flow, the
+active-learning uncertainty trigger, and the query/decision logic.
+
+> **Scope (per supervisor direction, 2026-07-28).** The formal research objective is to investigate
+> **whether patterns in the sensor data can be learned through active learning, and whether the
+> resulting query behaviour serves as a valid proxy for AI-mediated interaction with humans.** The
+> experiment and its in-depth analysis are the primary contribution. The Streamlit interface
+> (Layer 6) is a **demonstration artefact, not a research object**: it exists to make the loop
+> inspectable, and any observations drawn from it must be reported as **exploratory and
+> non-speculative**, grounded strictly in what the results show. No interface design claims are made.
 
 > **Design principle.** The architecture is the algorithmic embodiment of the Burra Charter's
-> *minimum-intervention* principle: the system stays silent unless it is uncertain, asks only then,
-> acts only with human confirmation, and logs everything for audit. Active learning *is* minimum
-> intervention expressed in code.
+> *minimum-intervention* principle: the system stays silent unless it is uncertain, queries only
+> then, and logs everything for audit. Active learning *is* minimum intervention expressed in code —
+> and the proxy question is precisely whether that minimal querying is sufficient.
 
 ---
 
@@ -69,7 +77,7 @@ flowchart TB
         ACT["Override / Confirm / Defer handler"]
     end
 
-    subgraph L6["6 - Interface (Streamlit)"]
+    subgraph L6["6 - Interface (Streamlit) - DEMONSTRATION ONLY, not a research object"]
         DASH["Per-zone dashboard:<br/>conditions, recommendation,<br/>confidence, evidence"]
         CO2["CO2 / air-quality<br/>context indicator ONLY"]
     end
@@ -136,24 +144,28 @@ flowchart LR
 
 Each architecture layer becomes a package under `dissertation_code/` (built incrementally per sprint):
 
-| Layer | Package | Status |
-|---|---|---|
-| 1 Data & ingestion | `dissertation_code/data/` (extends current `eda/loader.py`) | EDA done; unified loader next |
-| 1b EDA | `dissertation_code/eda/` | **Done (Sprint 1)** |
-| 2 Synthetic labelling | `dissertation_code/comfort/` (`pmv.py`, `synthetic_labels.py`) | Sprint 1 close / Sprint 2 |
-| 3 Active-learning core | `dissertation_code/active_learning/` (`model.py`, `query_strategy.py`, `loop.py`, `convergence.py`) | Sprint 3 |
-| 4 Explanation | `dissertation_code/explain/` (`shap_explainer.py`, `plain_language.py`) | Sprint 3 |
-| 5 Recommendation & decision | `dissertation_code/recommend/` (`recommender.py`, `tradeoff.py`, `decision.py`) | Sprint 3 |
-| 6 Interface | `dissertation_code/dashboard/app.py` (Streamlit) | Sprint 3 |
-| 7 Audit & evaluation | `dissertation_code/audit/` + `dissertation_code/evaluation/` | Sprint 3–4 |
+| Layer | Package | Status | Research role |
+|---|---|---|---|
+| 1 Data & ingestion | `dissertation_code/data/` (extends current `eda/loader.py`) | EDA done; unified loader next | **In scope** — enables the experiment |
+| 1b EDA | `dissertation_code/eda/` | **Done (Sprint 1)** | **In scope** — O2 characterisation |
+| 2 Synthetic labelling | `dissertation_code/comfort/` (`pmv.py`, `synthetic_labels.py`) | Sprint 1 close / Sprint 2 | **In scope** — the synthetic oracle |
+| 3 Active-learning core | `dissertation_code/model/` (`base.py`, `active_learning.py`) | Sprint 3 | **PRIMARY** — the experiment itself |
+| 4 Explanation | `dissertation_code/explain/` (`shap_explain.py`, `narrate.py`) | Sprint 3 | **In scope** — analysing *why* the loop queries what it queries |
+| 5 Recommendation & decision | `dissertation_code/recommend/` (`recommender.py`, `tradeoff.py`, `decision.py`) | Sprint 3 | Supporting — demonstration + audit plumbing |
+| 6 Interface | `dissertation_code/dashboard/app.py` (Streamlit) | Sprint 3 | **Demonstration only** — exploratory observations, no interface claims |
+| 7 Audit & evaluation | `dissertation_code/audit/` + `dissertation_code/evaluation/` | Sprint 3–4 | **PRIMARY** — the in-depth results analysis |
 
 ---
 
 ## 5. Cross-cutting invariants (must hold everywhere)
 
 - **Model inputs are temperature + RH only.** CO₂/light enter the dashboard as context, never the model.
-- **Every recommendation is auditable.** SHAP values + justification land in the audit log; the user
-  sees plain language.
-- **Every action is reversible by a human.** Override / confirm / defer, each with logged justification.
-- **Synthetic labels validate mechanics, not real-occupant accuracy.** State this honestly anywhere
-  results are reported.
+- **The active-learning experiment is the research contribution.** Layers 3 and 7 carry the formal
+  objective; every other layer exists to enable or interrogate them.
+- **Every query and recommendation is auditable.** SHAP values land in the audit log; the audit trail
+  is the evidence base for the in-depth analysis.
+- **Interface findings are exploratory, never speculative.** Anything observed through the dashboard
+  is reported as an exploratory observation grounded in results — never as a primary finding, and
+  never as a claim about how real humans would behave.
+- **Synthetic labels validate mechanics and the proxy question, not real-occupant accuracy.** State
+  this honestly anywhere results are reported.

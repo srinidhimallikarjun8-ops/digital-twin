@@ -6,9 +6,30 @@
 This document explains *why* each architectural decision was made, grounded in the research
 question, the heritage context, and the constraints of the proof-of-concept scope.
 
-**Research question:** *How can a digital twin, using active learning on temperature and humidity
-data, learn when and how to query occupant comfort preferences to provide interpretable, personalised
-recommendations that support informed human decision-making in a heritage context?*
+**Research question (formal scope, per supervisor direction 2026-07-28):**
+*Can patterns within temperature and humidity sensor data be learned through active learning, and
+can the resulting query behaviour serve as a valid **proxy** for AI-mediated interaction with
+humans — without requiring live human feedback?*
+
+The operative word is **proxy**. This is not merely "does active learning work on this dataset" as
+an isolated ML exercise. It asks whether the loop's *query strategy* — which readings it chooses to
+ask about, and when it stops asking — meaningfully approximates what would otherwise require live
+back-and-forth with a real occupant.
+
+---
+
+### Scope boundary (important)
+
+| In formal scope | Out of formal scope |
+|---|---|
+| Training the active-learning system on the comfort data | Building or evaluating human-facing interfaces |
+| Evaluating whether learned patterns are a valid proxy for human feedback | Claims about how real humans would respond |
+| In-depth analysis of the experiment results (convergence, query behaviour, SHAP) | Human-in-the-loop as a primary research objective |
+
+The Streamlit dashboard exists as a **demonstration artefact** — it makes the loop inspectable and
+provides an audit surface. It is **not** a research object. Any observation drawn from it is
+reported as an **exploratory observation**, grounded strictly in what the results show, and never
+speculative.
 
 ---
 
@@ -16,28 +37,32 @@ recommendations that support informed human decision-making in a heritage contex
 
 Every layer of the system is a direct answer to a specific part of the research question. The
 architecture is not a generic ML pipeline — it is the algorithmic embodiment of the Burra Charter's
-**minimum-intervention** principle: stay silent unless uncertain, ask only then, act only with human
-confirmation, and log everything.
+**minimum-intervention** principle: stay silent unless uncertain, query only then, and log
+everything. The proxy question is precisely whether that minimal querying is *sufficient*.
 
 ```mermaid
 flowchart LR
-    RQ["Research question:\nhow, when, interpretable,\npersonalised, heritage-appropriate"]
-    L1["Layer 1 — Data boundary\nT+RH only · enforced in code"]
-    L2["Layer 2 — Synthetic labels\nPMV prior + calibrated noise"]
-    L3["Layer 3 — Active learning\nquery only when uncertain"]
-    L4["Layer 4 — Explanation\nSHAP → plain language"]
-    L5["Layer 5 — Decision logic\nconfirm / override / defer + justification"]
-    L6["Layer 6 — Interface\nStreamlit dashboard"]
-    L7["Layer 7 — Audit log\ncross-cutting · append-only"]
+    RQ["Research question:\ncan AL learn the patterns,\nand is its query behaviour\na valid proxy for human interaction?"]
+    L3["Layer 3 — Active learning\nPRIMARY: the experiment itself"]
+    L7["Layer 7 — Evaluation + audit\nPRIMARY: the in-depth analysis"]
+    L1["Layer 1 — Data boundary\nenables the experiment"]
+    L2["Layer 2 — Synthetic oracle\nstands in for the human"]
+    L4["Layer 4 — Explanation\nanalyses WHY it queries what it queries"]
+    L5["Layer 5 — Decision logic\nsupporting plumbing"]
+    L6["Layer 6 — Interface\nDEMONSTRATION ONLY\nexploratory observations"]
 
-    RQ --> L1
-    RQ --> L2
     RQ --> L3
-    RQ --> L4
-    RQ --> L5
-    RQ --> L6
     RQ --> L7
+    L1 --> L3
+    L2 --> L3
+    L3 --> L4
+    L3 --> L7
+    L4 --> L7
+    L3 -.-> L5 -.-> L6
 ```
+
+Solid arrows carry the formal research objective. Dashed arrows lead to the demonstration surface,
+which supports the work but makes no research claim of its own.
 
 ---
 
@@ -316,13 +341,22 @@ flowchart TD
 
 ---
 
-### 3.6 Layer 6 — Interface (why Streamlit, why two tabs)
+### 3.6 Layer 6 — Interface (demonstration artefact, not a research object)
+
+> **Scope note.** Per supervisor direction, interface design is outside the formal dissertation
+> scope. This layer exists to make the active-learning loop *inspectable* — so the experiment's
+> query behaviour can be observed and audited directly. It is not evaluated as an interface, and
+> no claims are made about its usability or about how real humans would respond to it. Findings
+> surfaced through it are reported as **exploratory observations**, never as primary results.
 
 Streamlit was chosen for PoC scope — it keeps the interface as a pure display/input surface
 with **no business logic**. All model calls, label writes, and audit writes happen in the layer
-modules, making the dashboard replaceable without touching any other component.
+modules, making the dashboard replaceable without touching any other component. That separation
+is what allows the interface to be descoped from the research claims without touching the
+experiment: Layers 1–4 and 7 run headlessly via `evaluation/run.py`, entirely independent of
+the dashboard.
 
-The two-tab structure maps directly to the two directions of the human-AI loop:
+The two-tab structure demonstrates the two directions of the loop:
 
 ```mermaid
 flowchart LR
@@ -410,9 +444,98 @@ flowchart TB
 after 5 human labels of *too warm* (weighted 10×) → predicts *too warm* → persists after
 reloading the model from disk. The loop demonstrably closes.
 
+> **Scope framing.** This verification demonstrates that the *mechanism* works — feedback
+> propagates into the model and persists. It is reported as evidence that the loop is correctly
+> implemented, **not** as a finding about human behaviour or interface effectiveness.
+
 ---
 
-## 5. Design decisions summary
+## 5. The proxy question — the formal research objective
+
+This is the heart of the dissertation, and the part the architecture is ultimately built to answer.
+
+### 5.1 What "proxy" means here
+
+A conventional human-in-the-loop system requires a real person available to answer queries
+continuously. That is expensive, intrusive, and — in a heritage building with residents — often
+impractical. The research question asks whether the active-learning loop can stand in for that
+interaction: whether **the patterns it learns and the queries it chooses** approximate what live
+human feedback would have produced.
+
+```mermaid
+flowchart TB
+    subgraph REAL["What a full human-in-the-loop system would require"]
+        direction TB
+        R1["Real occupant available continuously"]
+        R2["Answers every query live"]
+        R3["Model learns from real votes"]
+        R1 --> R2 --> R3
+    end
+
+    subgraph PROXY["What this experiment tests instead"]
+        direction TB
+        P1["Synthetic oracle: PMV + calibrated noise"]
+        P2["AL loop selects which readings to query"]
+        P3["Model learns from synthetic responses"]
+        P1 --> P2 --> P3
+    end
+
+    Q{"Does the proxy path\nreach comparable performance\nwith minimal querying?"}
+    REAL -.->|"the thing being approximated"| Q
+    PROXY -->|"the thing being measured"| Q
+```
+
+### 5.2 How the architecture answers it — three pieces of evidence
+
+**Evidence 1 — Can the patterns be learned at all? (convergence study)**
+
+If active learning could not reach the accuracy of a fully-labelled model, the proxy claim would
+fail immediately. The convergence study measures exactly this:
+
+| Measure | Result |
+|---|---|
+| Full-labelled baseline accuracy | 0.708 |
+| Accuracy reached by the AL loop | within 5% of baseline |
+| Labels required to get there | ~2% of the pool (~27 of 1,355) |
+
+The accuracy ceiling (~0.71) is itself consistent with the 0.365 PMV-agreement rate — the model
+cannot exceed the quality of its labels, which is the expected and correct behaviour.
+
+**Evidence 2 — Are the queries it chooses sensible? (query behaviour analysis)**
+
+A proxy is only valid if the loop asks about the *right* things. This is where the domain triggers
+and SHAP layer earn their place in the architecture — they let the analysis show *why* each query
+was selected, not just that it was:
+
+- Do the queried readings cluster near genuine comfort boundaries, or are they arbitrary?
+- Do the domain triggers (PMV ±0.5, RH > 75%) surface conservation-relevant conditions that pure
+  entropy would have skipped?
+- Does SHAP show temperature and humidity contributing in physically plausible directions?
+
+This analysis is a primary deliverable — Ricardo's "very in-depth analysis of the results" is
+substantially *this*.
+
+**Evidence 3 — Does it stop asking? (minimum intervention)**
+
+A proxy that queries constantly has not replaced anything. The convergence threshold
+(`UNCERTAINTY_STOP_THRESHOLD = 0.35`) is what makes the minimum-intervention claim testable: the
+system must demonstrably go quiet once it has learned enough.
+
+### 5.3 What this design can and cannot establish
+
+| Can establish | Cannot establish |
+|---|---|
+| Whether the patterns in T+RH data are learnable via AL | Whether a real occupant would agree with the model |
+| How label-efficient the loop is (labels vs accuracy) | Whether the interface is usable or trusted |
+| Whether query selection targets meaningful boundaries | How humans would behave when queried |
+| Whether the loop converges and stops | Real-world comfort outcomes in the building |
+
+The right-hand column is future work requiring ethics approval and occupant recruitment. Stating
+this boundary explicitly is what keeps the exploratory observations non-speculative.
+
+---
+
+## 6. Design decisions summary
 
 | Decision | Chosen | Alternatives ruled out | Reason |
 |---|---|---|---|
@@ -435,7 +558,7 @@ reloading the model from disk. The loop demonstrably closes.
 
 ---
 
-## 6. Definition and explanation of terms
+## 7. Definition and explanation of terms
 
 Only terms that are genuinely non-obvious are explained here — comfort science units, research
 methodology phrases, and ML concepts that have project-specific meaning. If you hit a word not
@@ -815,7 +938,8 @@ Bath is the target building.
 **Design science research (Hevner et al. 2004)**
 A research methodology where the main contribution is a designed *artefact* (a system or
 tool) that solves a real-world problem, paired with a rigorous evaluation. The artefact here
-is the human-in-the-loop decision-support system.
+is the active-learning system and its query strategy; the evaluation is the convergence and
+query-behaviour analysis.
 
 **Proof of concept (PoC)**
 Demonstrates that the core idea and mechanics work end-to-end — not that the system is
@@ -882,9 +1006,11 @@ convergence study uses this as a reference to measure how quickly active learnin
 
 ---
 
-## 7. One-sentence summary
+## 8. One-sentence summary
 
 The architecture is a direct translation of the research constraints into code: **only T+RH enters
-the model** (scope + ethics), **uncertainty triggers before asking** (minimum intervention),
-**SHAP explains after predicting** (interpretability), **every action requires justification**
-(heritage auditability), and **synthetic labels validate mechanics** — honestly, not overclaimed.
+the model** (scope + ethics), **uncertainty triggers before querying** (minimum intervention),
+**SHAP explains why each query was chosen** (the analysis layer), **every event is audited**
+(the evidence base), and **the active-learning experiment — not the interface — carries the
+research claim**, with the proxy question answered by convergence, query behaviour, and stopping
+behaviour rather than by any assertion about real human response.
