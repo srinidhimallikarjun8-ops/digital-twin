@@ -8,7 +8,6 @@ results, and closes the loop — every confirm/override/query answer becomes a s
 model is retrained so the *next* prediction reflects it.
 """
 
-# ruff: noqa: E402  (imports below intentionally follow the sys.path bootstrap)
 from __future__ import annotations
 
 import sys

@@ -15,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 
 from dissertation_code import config
-from dissertation_code.data import schema
+from dissertation_code.data import bath, schema
 from dissertation_code.eda.loader import (
     drop_missing_sensor_values,
     filter_temp_rh,
@@ -46,14 +46,31 @@ def load_lasdpc(csv_path: Path = config.LASDPC_DATASET_PATH) -> pd.DataFrame:
 
 
 def load_bath(
-    *_args, **_kwargs
-) -> pd.DataFrame:  # pragma: no cover - data not yet available
-    """Adapter for the Bath Connaught Mansions Tinytag export.
+    data_dir: Path = config.BATH_DATASET_DIR,
+    include_external: bool = False,
+) -> pd.DataFrame:
+    """Load the Bath Connaught Mansions export as a unified, schema-valid long frame (T+RH only).
 
-    Not implemented: the raw Tinytag files are not yet in the repo (KB open question / risk
-    register). The signature is fixed now so the rest of the pipeline can target it; the body
-    lands once the export is provided. Placements RHT/ERHT carry both T+RH; T carries temp only.
+    Unlike LaSDPC, this source pairs T and RH natively (same row, same timestamp), so callers
+    must NOT resample it onto a common grid — see `bath.load_wide`. The long shape here exists
+    only to keep one adapter contract across sources.
+
+    Args:
+        data_dir: directory holding the quarterly workbooks.
+        include_external: keep the two outdoor sensors (excluded by default: nobody occupies
+            the outdoors, so they are context for clothing insulation rather than comfort data).
     """
-    raise NotImplementedError(
-        "Bath Tinytag export not yet ingested; provide the raw logger files first."
-    )
+    wide = bath.load_wide(data_dir=data_dir, include_external=include_external)
+    return bath.to_long(wide)
+
+
+def load_bath_wide(
+    data_dir: Path = config.BATH_DATASET_DIR,
+    include_external: bool = False,
+) -> pd.DataFrame:
+    """Load Bath directly in wide form, skipping the long round-trip.
+
+    The pipeline uses this for Bath because the export is already paired: melting to long and
+    immediately pivoting back would be pure overhead and would drop the native pairing guarantee.
+    """
+    return bath.load_wide(data_dir=data_dir, include_external=include_external)

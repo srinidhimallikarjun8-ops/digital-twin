@@ -47,7 +47,7 @@ class ComfortModel:
         X: pd.DataFrame,
         y: pd.Series | np.ndarray,
         sample_weight: np.ndarray | None = None,
-    ) -> "ComfortModel":
+    ) -> ComfortModel:
         """Fit on a frame containing the FEATURES columns and a comfort-class target.
 
         ``sample_weight`` lets human labels outweigh the synthetic PMV prior during retraining.

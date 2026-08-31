@@ -14,11 +14,11 @@ import pandas as pd
 
 from dissertation_code import config
 from dissertation_code.audit import log as audit
+from dissertation_code.data import schema
 from dissertation_code.explain.narrate import narrate
 from dissertation_code.explain.shap_explain import Attribution, explain_instance
 from dissertation_code.model import active_learning as al
 from dissertation_code.model.base import ComfortModel
-from dissertation_code.data import schema
 
 # Suggested action per predicted comfort class.
 _ACTION = {

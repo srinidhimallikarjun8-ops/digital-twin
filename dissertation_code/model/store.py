@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +33,7 @@ def save_model(
 
     joblib.dump(model, model_path)
     full_manifest = {
-        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "saved_at": datetime.now(UTC).isoformat(),
         "random_seed": config.RANDOM_SEED,
         "model_features": list(config.COMFORT_VARS),
         "comfort_classes": list(config.COMFORT_CLASSES),

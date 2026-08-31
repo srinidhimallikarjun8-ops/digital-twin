@@ -12,8 +12,9 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from dissertation_code import config
+from dissertation_code.comfort import clothing
 from dissertation_code.comfort import synthetic_labels as sl
-from dissertation_code.data import schema, sources
+from dissertation_code.data import bath, schema, sources
 from dissertation_code.model import active_learning as al
 from dissertation_code.model import label_store, store
 from dissertation_code.model.base import ComfortModel
@@ -21,14 +22,48 @@ from dissertation_code.model.base import ComfortModel
 logger = logging.getLogger(__name__)
 
 
-def build_labelled_dataset() -> pd.DataFrame:
-    """Load LaSDPC, resample, pair T+RH, and attach synthetic comfort labels (wide frame)."""
-    long = sources.load_lasdpc()
-    gridded = schema.resample_long(long)
-    wide = schema.to_wide(gridded)
-    labelled = sl.generate_labels(wide)
+def build_labelled_dataset(source: str = "lasdpc") -> pd.DataFrame:
+    """Build the labelled wide frame for a dataset source.
+
+    Args:
+        source: "lasdpc" (the Sprint-1 slice) or "bath" (Connaught Mansions, the final dataset).
+
+    The two sources differ in two ways that matter:
+
+    * **Pairing.** LaSDPC logs T and RH on separate devices seconds apart, so it must be
+      resampled onto a common grid before pivoting (DD-006). Bath logs both channels on the same
+      row, so resampling is skipped — it would only blur real readings.
+    * **Clothing.** Bath uses outdoor-driven clothing insulation and a two-class target
+      (DD-017, DD-019); without them 100% of its readings label "too_cool" and the experiment
+      cannot run. LaSDPC keeps the original fixed-assumption three-class behaviour.
+    """
+    if source == "lasdpc":
+        long = sources.load_lasdpc()
+        gridded = schema.resample_long(long)
+        wide = schema.to_wide(gridded)
+        labelled = sl.generate_labels(wide)
+    elif source == "bath":
+        everything = sources.load_bath_wide(include_external=True)
+        is_external = everything[schema.ZONE].isin(bath.EXTERNAL_SENSORS)
+        indoor = everything[~is_external]
+        external = everything[is_external]
+
+        wide = clothing.attach_clo(indoor, external)
+        labelled = sl.generate_labels(
+            wide,
+            sl.GeneratorConfig(
+                clo_column=clothing.CLOTHING_INSULATION,
+                merge_warm=config.MERGE_WARM_CLASS,
+            ),
+        )
+    else:
+        raise ValueError(
+            f"unknown dataset source: {source!r} (expected 'lasdpc' or 'bath')"
+        )
+
     logger.info(
-        "built labelled dataset: %d rows across %d zones",
+        "built labelled dataset (%s): %d rows across %d zones",
+        source,
         len(labelled),
         labelled[schema.ZONE].nunique(),
     )
@@ -40,7 +75,14 @@ def split(
     test_size: float = 0.25,
     random_state: int = config.RANDOM_SEED,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Stratified train/test split on the comfort class (reproducible)."""
+    """Stratified random train/test split on the comfort class (reproducible).
+
+    **Leaky on time-series data**, and deliberately retained as such: at a 5-minute cadence
+    adjacent readings are near-identical, so a random split puts near-duplicates on both sides
+    and inflates accuracy. Kept for the dashboard and as the documented leaky baseline — the gap
+    between this and `split_temporal` quantifies the leakage. Use `split_temporal` for the
+    experiment (DD-020).
+    """
     train, test = train_test_split(
         labelled,
         test_size=test_size,
@@ -48,6 +90,63 @@ def split(
         stratify=labelled[sl.COMFORT_CLASS],
     )
     return train.reset_index(drop=True), test.reset_index(drop=True)
+
+
+def split_temporal(
+    labelled: pd.DataFrame,
+    cutoff: str = config.TEMPORAL_SPLIT_CUTOFF,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Train on everything before `cutoff`, test on/after it (DD-020).
+
+    The primary split for the experiment. It avoids the near-duplicate leakage of a random split,
+    matches deployment (train on history, predict forward), and tests the seasonal transition.
+
+    Caveat to report alongside results: train and test have different clothing assumptions and
+    class balances, so an accuracy drop relative to a random split reflects distribution shift as
+    well as split difficulty — the two must not be conflated.
+    """
+    boundary = pd.Timestamp(cutoff)
+    before = labelled[schema.TIMESTAMP] < boundary
+    train = labelled[before].reset_index(drop=True)
+    test = labelled[~before].reset_index(drop=True)
+
+    if train.empty or test.empty:
+        raise ValueError(
+            f"temporal cutoff {cutoff} leaves an empty split "
+            f"(train={len(train)}, test={len(test)})"
+        )
+
+    logger.info("temporal split at %s: train=%d test=%d", cutoff, len(train), len(test))
+    return train, test
+
+
+def split_by_room(
+    labelled: pd.DataFrame,
+    holdout_rooms: tuple[str, ...] = config.HOLDOUT_ROOMS,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Hold out whole rooms for the cross-room generalisation arm.
+
+    Answers a question the temporal split cannot: does a model trained on some rooms transfer to
+    an unseen one? Interesting on this building because the kitchen is a genuine outlier — 66% of
+    its readings exceed 75% RH, against 20% or less elsewhere.
+    """
+    is_holdout = labelled[schema.ZONE].isin(holdout_rooms)
+    train = labelled[~is_holdout].reset_index(drop=True)
+    test = labelled[is_holdout].reset_index(drop=True)
+
+    if train.empty or test.empty:
+        raise ValueError(
+            f"holdout rooms {holdout_rooms} leave an empty split "
+            f"(train={len(train)}, test={len(test)})"
+        )
+
+    logger.info(
+        "room split holding out %s: train=%d test=%d",
+        holdout_rooms,
+        len(train),
+        len(test),
+    )
+    return train, test
 
 
 def train_static_model() -> tuple[ComfortModel, pd.DataFrame, pd.DataFrame]:

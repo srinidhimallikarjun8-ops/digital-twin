@@ -1,0 +1,13 @@
+dataset,strategy,seed,phase,iteration,temperature,relative_humidity,observed_label,final_model_prediction,temperature_shap,rh_shap,dominant_feature
+Bath,entropy,42,early,0,17.317,79.1,comfortable,comfortable,0.4363541360733643,0.06043374271476899,temperature
+Bath,entropy,42,middle,99,14.934,72.7,comfortable,comfortable,0.023050783484102392,0.18623709530368954,relative_humidity
+Bath,entropy,42,late,197,13.922,86.8,too_cool,too_cool,0.1135629759056373,0.24214914530635676,relative_humidity
+Bath,random,42,early,0,16.198,74.1,comfortable,comfortable,0.18215901874830545,0.16850764791822537,temperature
+Bath,random,42,middle,99,15.406,72.4,comfortable,comfortable,0.33372309061571864,0.1019435760510394,temperature
+Bath,random,42,late,197,13.864,73.0,comfortable,comfortable,0.0923570048796618,0.05830966178693774,temperature
+LaSDPC,entropy,42,early,0,27.02380952380953,57.14137931034482,comfortable,comfortable,0.1639008185109249,0.40307286569958484,relative_humidity
+LaSDPC,entropy,42,middle,19,26.68095238095238,69.27,comfortable,too_warm,0.14894829257746642,0.0399727600541132,temperature
+LaSDPC,entropy,42,late,37,22.128,84.95200000000001,comfortable,comfortable,0.10525248071254298,0.5217212034979598,relative_humidity
+LaSDPC,random,42,early,0,17.13684210526316,57.18666666666666,comfortable,too_cool,0.2456601796248488,0.02160297826988604,temperature
+LaSDPC,random,42,middle,19,24.1,79.1,comfortable,comfortable,0.37105697891005,0.1856403895109908,temperature
+LaSDPC,random,42,late,37,24.476190476190474,66.58529411764705,too_warm,too_warm,0.2683640361816988,0.39267543750251,relative_humidity

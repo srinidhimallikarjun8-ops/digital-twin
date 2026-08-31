@@ -67,6 +67,14 @@ COMFORT_CLASSES = (
     COMFORT_CLASS_COMFORTABLE,
     COMFORT_CLASS_TOO_WARM,
 )
+#: Two-class target used for the Bath experiment (DD-019, supersedes DD-009 for this building).
+#: Connaught Mansions never exceeds 22.9 degC in 8 months; at that reading PMV = -0.08, so
+#: P(vote > +1) = 0.058 even at the hottest point. Every "too_warm" label would therefore be a
+#: sigma=1.0 noise draw with no physical signal, and class_weight="balanced" would up-weight pure
+#: noise ~150x. The warm class is merged into "comfortable" and the collapse reported as a finding.
+COMFORT_CLASSES_2 = (COMFORT_CLASS_TOO_COOL, COMFORT_CLASS_COMFORTABLE)
+#: When True, vote > +threshold maps to "comfortable" rather than "too_warm".
+MERGE_WARM_CLASS = True
 
 # --- Active-learning model + loop ----------------------------------------------------------
 #: RandomForest size (kept small: interpretable, fast, sufficient for a PoC on T+RH).
@@ -85,17 +93,75 @@ HUMAN_LABEL_WEIGHT = 10.0
 #: Active-query mode stops asking once the most-uncertain pool instance falls below this.
 UNCERTAINTY_STOP_THRESHOLD = 0.35
 
-# --- Active-learning convergence targets (Sprint 4; placeholders) --------------------------
-#: Target: reach within this fraction of the full-labelled baseline accuracy...
-CONVERGENCE_ACCURACY_TOLERANCE = 0.05  # TODO: confirm in methodology chapter
-#: ...using no more than this fraction of the available labels.
-LABEL_BUDGET_FRACTION = 0.40  # TODO: confirm in methodology chapter
+# --- Active-learning convergence reference values (DD-022) ---------------------------------
+#: Descriptive legacy target: within five percentage points of the full-label baseline. The final
+#: study reports complete learning curves and balanced metrics rather than declaring success from
+#: this threshold alone.
+CONVERGENCE_ACCURACY_TOLERANCE = 0.05
+#: Descriptive budget cap retained for backwards-compatible convergence tests. The formal strategy
+#: comparison uses equal absolute budgets and labels-to-random-target.
+LABEL_BUDGET_FRACTION = 0.40
+
+# --- Clothing insulation from outdoor conditions (DD-017) ----------------------------------
+#: A FIXED clo is untenable on the Bath data: at 0.5 clo (inherited from the warm-climate LaSDPC
+#: work) PMV neutrality sits at ~24.5 degC while the flat averages ~15 degC, so 100% of readings
+#: label "too_cool" and the uncertainty trigger fires on 100% of rows — no decision boundary, so
+#: the active-learning experiment cannot run at all.
+#: A month->clo schedule was tried and REJECTED by measurement: this building's summer is ~17.8
+#: degC, so lightening clothing in June drove PMV DOWN (-1.40 vs -0.73 at a flat 1.0 clo) — it
+#: anti-correlated the correction with the thing it was meant to correct.
+#: Instead clo responds to a running mean of OUTDOOR temperature (ASHRAE 55 / ISO 7730 treat clo
+#: as contextual; de Dear & Brager on adaptive clothing adjustment). Verified: Jan 1.17 -> Jul
+#: 0.72, giving a stable 35-49% "too_cool" share in every month with no seasonal inversion.
+CLO_MIN = 0.6  # clo (lightest indoor clothing assumed)
+CLO_MAX = 1.25  # clo (heaviest: indoor winter layers in an unheated flat)
+CLO_SLOPE = 0.045  # clo lost per degC of outdoor warming
+CLO_REF_TEMP = 5.0  # deg C outdoor running mean at which clo = CLO_MAX
+CLO_RUNNING_MEAN_DAYS = 7  # days in the outdoor running mean
+
+# --- Bath experiment: pool sampling and splits ---------------------------------------------
+#: Active-learning pool size. The full 514k readings are 5-min cadence, so adjacent rows are
+#: near-duplicates that add no information; 20k keeps predict_proba ~0.5s so the full experiment
+#: matrix stays tractable. Stratified by (zone x month) to preserve the real class mix.
+POOL_SIZE = 20_000
+#: Held-out rows used for scoring. The test set is evaluated after *every* AL iteration (~200
+#: per run), so the full ~129k held-out period would dominate total runtime. At 25k the standard
+#: error on accuracy is below 0.003 — an order of magnitude finer than the strategy differences
+#: being measured.
+TEST_SET_SIZE = 25_000
+#: Temporal split boundary (DD-020). Train on everything before this date, test on/after it.
+#: Random splitting leaks: at 5-min cadence adjacent readings are near-identical, so a random
+#: split puts near-duplicates on both sides and inflates accuracy. A temporal split also matches
+#: deployment (train on history, predict forward) and tests the seasonal transition.
+TEMPORAL_SPLIT_CUTOFF = "2024-05-01"
+#: Rooms held out for the secondary cross-room generalisation arm.
+HOLDOUT_ROOMS = ("kitchen",)
+
+# --- Experiment matrix (Sprint 5) ----------------------------------------------------------
+#: Query strategies compared. "random" is the null hypothesis the proxy claim must beat.
+EXPERIMENT_STRATEGIES = ("random", "entropy", "margin")
+#: Seeds for repeated runs; 10 repeats give usable confidence intervals on the learning curves.
+EXPERIMENT_SEEDS = tuple(range(42, 52))
+#: Label budget per run (upper bound on oracle queries).
+EXPERIMENT_LABEL_BUDGET = 2_000
 
 # --- Paths (resolved relative to the repo root) --------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LASDPC_DATASET_PATH = PROJECT_ROOT / "datasets" / "iot-dataset" / "Dataset_slice.csv"
+BATH_DATASET_DIR = PROJECT_ROOT / "DigitalTwinData"
+#: Bath quarterly workbooks, in chronological order.
+BATH_WORKBOOKS = (
+    "oct_jan_anonymised.xlsx",
+    "jan_march_anonymised.xlsx",
+    "march_may_anonymised.xlsx",
+    "may_july_anonymised.xlsx",
+)
 PROCESSED_DIR = PROJECT_ROOT / "dissertation_code" / "data" / "processed"
 AUDIT_LOG_PATH = PROJECT_ROOT / "dissertation_code" / "audit" / "audit_log.jsonl"
+#: Experiment results (tidy CSV, one row per AL iteration) and figures.
+RESULTS_DIR = PROJECT_ROOT / "dissertation_code" / "evaluation" / "results"
+EXPERIMENT_CSV_PATH = RESULTS_DIR / "experiment_runs.csv"
+FIGURES_DIR = RESULTS_DIR / "figures"
 
 # Model + label artifacts (regenerated; gitignored).
 ARTIFACTS_DIR = PROJECT_ROOT / "dissertation_code" / "model" / "artifacts"

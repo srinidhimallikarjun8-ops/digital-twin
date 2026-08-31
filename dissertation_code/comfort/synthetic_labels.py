@@ -48,16 +48,27 @@ COMFORT_CLASS = "comfort_class"  # directional class: too_cool / comfortable / t
 
 
 def vote_to_comfort_class(
-    vote: int, threshold: int = config.COMFORT_VOTE_THRESHOLD
+    vote: int,
+    threshold: int = config.COMFORT_VOTE_THRESHOLD,
+    merge_warm: bool = False,
 ) -> str:
     """Map a discrete sensation vote to a directional comfort class (the model target).
 
     A negative vote beyond the threshold is "too cool", a positive one "too warm", otherwise
     "comfortable". The direction is what makes a recommendation actionable (warm vs cool the zone).
+
+    Args:
+        vote: discrete ASHRAE sensation vote (-3..+3).
+        threshold: |vote| <= this is "comfortable".
+        merge_warm: collapse "too_warm" into "comfortable" (DD-019). Required for the Bath
+            building, which never exceeds 22.9 degC: at that hottest reading in 8 months PMV is
+            -0.08, so P(vote > +1) = 0.058 even there. Every "too_warm" label would be a
+            sigma=1.0 noise draw with no physical signal, and class_weight="balanced" would
+            up-weight that pure noise ~150x. Left False so existing 3-class behaviour is unchanged.
     """
     if vote < -threshold:
         return config.COMFORT_CLASS_TOO_COOL
-    if vote > threshold:
+    if vote > threshold and not merge_warm:
         return config.COMFORT_CLASS_TOO_WARM
     return config.COMFORT_CLASS_COMFORTABLE
 
@@ -70,6 +81,27 @@ class GeneratorConfig:
     seed: int = config.RANDOM_SEED
     comfort_vote_threshold: int = config.COMFORT_VOTE_THRESHOLD
     assumptions: pmv_model.ComfortAssumptions | None = None
+    #: Column holding a per-row clothing insulation (clo). When set, PMV is computed row-wise
+    #: with that value instead of the single fixed `assumptions` clo — see comfort/clothing.py
+    #: and DD-017. None preserves the original fixed-assumption behaviour exactly.
+    clo_column: str | None = None
+    #: Collapse "too_warm" into "comfortable" (DD-019). See `vote_to_comfort_class`.
+    merge_warm: bool = False
+    #: Fraction of the noise variance that is a *persistent per-occupant offset* rather than
+    #: independent per-reading jitter (DD-023). None reproduces the original all-independent
+    #: behaviour exactly.
+    #:
+    #: The default model draws fresh noise for every reading, which implies the same occupant
+    #: feels randomly different every five minutes. Real occupants are internally consistent:
+    #: an individual who runs cold runs cold all day. Comfort research treats that as
+    #: between-person variance, distinct from within-person variability.
+    #:
+    #: Splitting the variance keeps the *marginal* distribution — and therefore the Cheung et
+    #: al. (2019) agreement calibration — unchanged, because
+    #: ``sigma_between^2 + sigma_within^2 = noise_sigma^2``.
+    between_occupant_fraction: float | None = None
+    #: Column identifying the occupant. Each distinct value receives its own persistent offset.
+    occupant_column: str = schema.ZONE
 
 
 def generate_labels(
@@ -96,20 +128,74 @@ def generate_labels(
         )
 
     out = wide.copy()
-    out[PMV_VALUE] = [
-        pmv_model.pmv(t, rh, assumptions=cfg.assumptions)
-        for t, rh in zip(out[schema.TEMPERATURE], out[schema.RELATIVE_HUMIDITY])
-    ]
+    if cfg.clo_column is not None:
+        if cfg.clo_column not in out.columns:
+            raise ValueError(
+                f"clo_column {cfg.clo_column!r} not found in the input frame; "
+                "call comfort.clothing.attach_clo first"
+            )
+        out[PMV_VALUE] = pmv_model.pmv_series(
+            out[schema.TEMPERATURE],
+            out[schema.RELATIVE_HUMIDITY],
+            out[cfg.clo_column],
+        )
+    else:
+        out[PMV_VALUE] = [
+            pmv_model.pmv(t, rh, assumptions=cfg.assumptions)
+            for t, rh in zip(out[schema.TEMPERATURE], out[schema.RELATIVE_HUMIDITY])
+        ]
 
     rng = np.random.default_rng(cfg.seed)
-    noisy = out[PMV_VALUE].to_numpy() + rng.normal(0.0, cfg.noise_sigma, size=len(out))
+    noise = _draw_noise(out, cfg, rng)
+    noisy = out[PMV_VALUE].to_numpy() + noise
     out[SENSATION_VOTE] = _to_sensation_scale(noisy)
     out[COMFORT_LABEL] = out[SENSATION_VOTE].abs() <= cfg.comfort_vote_threshold
     out[COMFORT_CLASS] = [
-        vote_to_comfort_class(v, cfg.comfort_vote_threshold)
+        vote_to_comfort_class(v, cfg.comfort_vote_threshold, merge_warm=cfg.merge_warm)
         for v in out[SENSATION_VOTE]
     ]
     return out
+
+
+def _draw_noise(
+    frame: pd.DataFrame, cfg: GeneratorConfig, rng: np.random.Generator
+) -> np.ndarray:
+    """Draw the occupant-response noise added to PMV.
+
+    Two structures, both with total standard deviation ``cfg.noise_sigma``:
+
+    * **Independent** (default) — a fresh draw per reading. Simple, but implies an occupant whose
+      thermal sensation is uncorrelated between one reading and the next.
+    * **Split** (``between_occupant_fraction`` set) — a persistent offset per occupant plus
+      independent jitter, with ``sigma_between^2 + sigma_within^2 = noise_sigma^2``.
+
+    The split preserves the marginal noise distribution exactly, so the PMV-agreement rate that
+    calibrates ``noise_sigma`` against Cheung et al. (2019) is unaffected. What changes is that
+    part of the deviation is now *structured* — constant within an occupant — and therefore
+    learnable from that occupant's readings, rather than irreducible.
+    """
+    if cfg.between_occupant_fraction is None:
+        return rng.normal(0.0, cfg.noise_sigma, size=len(frame))
+
+    fraction = cfg.between_occupant_fraction
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError(f"between_occupant_fraction must be in [0, 1]; got {fraction}")
+    if cfg.occupant_column not in frame.columns:
+        raise ValueError(
+            f"occupant_column {cfg.occupant_column!r} not found in the input frame"
+        )
+
+    # Variance split, so the marginal standard deviation stays at noise_sigma.
+    sigma_between = cfg.noise_sigma * np.sqrt(fraction)
+    sigma_within = cfg.noise_sigma * np.sqrt(1.0 - fraction)
+
+    occupants = frame[cfg.occupant_column].to_numpy()
+    unique = pd.unique(occupants)
+    offsets = dict(zip(unique, rng.normal(0.0, sigma_between, size=len(unique))))
+
+    persistent = np.array([offsets[o] for o in occupants])
+    jitter = rng.normal(0.0, sigma_within, size=len(frame))
+    return persistent + jitter
 
 
 def _to_sensation_scale(values: np.ndarray) -> np.ndarray:

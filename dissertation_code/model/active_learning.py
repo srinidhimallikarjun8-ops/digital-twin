@@ -53,9 +53,24 @@ def uncertainty_score(
 
 
 # --- Domain triggers -----------------------------------------------------------------------
-def pmv_trigger(temperature: float, relative_humidity: float) -> bool:
-    """True when PMV falls outside the comfort band (|PMV| > config.PMV_NEUTRAL_BAND)."""
-    return not pmv_model.is_comfortable(pmv_model.pmv(temperature, relative_humidity))
+def pmv_trigger(
+    temperature: float,
+    relative_humidity: float,
+    assumptions: pmv_model.ComfortAssumptions | None = None,
+) -> bool:
+    """True when PMV falls outside the comfort band (|PMV| > config.PMV_NEUTRAL_BAND).
+
+    Args:
+        temperature: deg C.
+        relative_humidity: percent.
+        assumptions: comfort assumptions. Defaults to the fixed sedentary-indoor set. **Pass the
+            same assumptions used to generate the labels** — with outdoor-driven clothing
+            (DD-017) the default 0.5 clo would evaluate the trigger against a different clo than
+            the labels, a silent inconsistency.
+    """
+    return not pmv_model.is_comfortable(
+        pmv_model.pmv(temperature, relative_humidity, assumptions=assumptions)
+    )
 
 
 def sustained_humidity_trigger(
@@ -92,22 +107,18 @@ def instantaneous_humidity_trigger(
 
 
 # --- Query selection -----------------------------------------------------------------------
-def select_queries(
-    model: ComfortModel,
-    pool: pd.DataFrame,
-    batch_size: int = config.QUERY_BATCH_SIZE,
-    strategy: str = config.UNCERTAINTY_STRATEGY,
-) -> np.ndarray:
-    """Choose the most informative pool rows to query.
+#: Column names carrying precomputed domain triggers (see data/sampling.py). When present in the
+#: pool they are read directly; recomputing them costs ~4.3 s per call on every AL iteration.
+PRECOMPUTED_TRIGGER_COLUMN = "any_triggered"
 
-    Ranks by model uncertainty, but always prioritises rows whose domain trigger has fired, so
-    conservation-relevant moments (high humidity / outside comfort band) are never skipped.
+#: Query strategy that ignores the model entirely — the null hypothesis the proxy claim must beat.
+RANDOM_STRATEGY = "random"
 
-    Returns:
-        Positional indices into ``pool`` of the selected rows (length <= batch_size).
-    """
-    proba = model.predict_proba(pool)
-    scores = uncertainty_score(proba, strategy)
+
+def _pool_triggers(pool: pd.DataFrame) -> np.ndarray:
+    """Domain-trigger flags for a pool, reading precomputed columns when available."""
+    if PRECOMPUTED_TRIGGER_COLUMN in pool.columns:
+        return pool[PRECOMPUTED_TRIGGER_COLUMN].to_numpy(dtype=bool)
 
     humidity_flags = sustained_humidity_trigger(pool).to_numpy()
     pmv_flags = np.array(
@@ -116,7 +127,47 @@ def select_queries(
             for t, rh in zip(pool[schema.TEMPERATURE], pool[schema.RELATIVE_HUMIDITY])
         ]
     )
-    triggered = humidity_flags | pmv_flags
+    return humidity_flags | pmv_flags
+
+
+def select_queries(
+    model: ComfortModel,
+    pool: pd.DataFrame,
+    batch_size: int = config.QUERY_BATCH_SIZE,
+    strategy: str = config.UNCERTAINTY_STRATEGY,
+    use_trigger: bool = True,
+    random_state: int | None = None,
+) -> np.ndarray:
+    """Choose the most informative pool rows to query.
+
+    Ranks by model uncertainty, optionally prioritising rows whose domain trigger has fired so
+    conservation-relevant moments (high humidity / outside the comfort band) are never skipped.
+
+    Args:
+        model: the current fitted model (unused when ``strategy`` is "random").
+        pool: candidate rows. Must carry zone/timestamp unless triggers are precomputed.
+        batch_size: number of rows to select.
+        strategy: "entropy", "margin", or "random" (uniform selection, ignoring the model).
+        use_trigger: prioritise domain-triggered rows ahead of the uncertainty ranking. On the
+            Bath building the trigger fires on ~97% of rows, so this makes almost no difference
+            there — measuring that is itself a finding (DD-018).
+        random_state: seed for the "random" strategy.
+
+    Returns:
+        Positional indices into ``pool`` of the selected rows (length <= batch_size).
+    """
+    if strategy == RANDOM_STRATEGY:
+        rng = np.random.default_rng(random_state)
+        size = min(batch_size, len(pool))
+        return rng.choice(len(pool), size=size, replace=False)
+
+    proba = model.predict_proba(pool)
+    scores = uncertainty_score(proba, strategy)
+
+    if not use_trigger:
+        return np.argsort(scores)[::-1][:batch_size]
+
+    triggered = _pool_triggers(pool)
     # Triggered rows sort ahead of non-triggered; ties broken by uncertainty.
     ranking = np.lexsort((scores, triggered))[::-1]
     return ranking[:batch_size]
@@ -125,11 +176,21 @@ def select_queries(
 # --- The loop ------------------------------------------------------------------------------
 @dataclass
 class ActiveLearningResult:
-    """Outcome of an active-learning run."""
+    """Outcome of an active-learning run.
+
+    ``queried_rows`` holds one record per queried instance (iteration, zone, month, T, RH, class,
+    uncertainty, whether its domain trigger fired). That per-query detail is what the "in-depth
+    analysis of the results" rests on — query composition by room and season, boundary behaviour,
+    and the trigger's real contribution can all be recovered from it.
+    """
 
     model: ComfortModel
     label_counts: list[int] = field(default_factory=list)
     accuracies: list[float] = field(default_factory=list)
+    balanced_accuracies: list[float] = field(default_factory=list)
+    macro_f1s: list[float] = field(default_factory=list)
+    max_uncertainties: list[float] = field(default_factory=list)
+    queried_rows: list[dict] = field(default_factory=list)
     n_labels_used: int = 0
 
 
@@ -141,6 +202,9 @@ def run_active_learning(
     batch_size: int = config.QUERY_BATCH_SIZE,
     max_labels: int | None = None,
     random_state: int = config.RANDOM_SEED,
+    strategy: str = config.UNCERTAINTY_STRATEGY,
+    use_trigger: bool = True,
+    record_queries: bool = False,
 ) -> ActiveLearningResult:
     """Run the pool-based active-learning loop against a synthetic oracle.
 
@@ -155,7 +219,14 @@ def run_active_learning(
         seed_count: initial random labels before active learning begins.
         batch_size: labels revealed per iteration.
         max_labels: stop after this many labels (defaults to the whole pool).
+        random_state: seed for the initial draw, the model, and random selection.
+        strategy: "entropy", "margin", or "random". "random" is the null hypothesis: if
+            uncertainty sampling cannot beat it, the proxy claim fails.
+        use_trigger: prioritise domain-triggered rows in query selection.
+        record_queries: capture per-query detail into ``queried_rows`` for the analysis.
     """
+    from sklearn.metrics import balanced_accuracy_score, f1_score
+
     rng = np.random.default_rng(random_state)
     pool = labelled_pool.reset_index(drop=True)
     y_pool = pool[sl.COMFORT_CLASS].to_numpy()
@@ -166,26 +237,72 @@ def run_active_learning(
     seed_idx = rng.choice(len(pool), size=min(seed_count, len(pool)), replace=False)
     labelled_mask[seed_idx] = True
 
+    triggers = _pool_triggers(pool) if record_queries else None
+
     model = ComfortModel(random_state=random_state)
     result = ActiveLearningResult(model=model)
+    iteration = 0
 
     while True:
         train = pool[labelled_mask]
         model.fit(train, y_pool[labelled_mask])
-        accuracy = float((model.predict(test_set) == y_test).mean())
-        result.label_counts.append(int(labelled_mask.sum()))
-        result.accuracies.append(accuracy)
 
-        if labelled_mask.all() or labelled_mask.sum() >= budget:
-            break
+        predictions = model.predict(test_set)
+        result.label_counts.append(int(labelled_mask.sum()))
+        result.accuracies.append(float((predictions == y_test).mean()))
+        result.balanced_accuracies.append(
+            float(balanced_accuracy_score(y_test, predictions))
+        )
+        result.macro_f1s.append(
+            float(f1_score(y_test, predictions, average="macro", zero_division=0))
+        )
 
         remaining_idx = np.flatnonzero(~labelled_mask)
-        chosen_local = select_queries(model, pool.iloc[remaining_idx], batch_size)
-        labelled_mask[remaining_idx[chosen_local]] = True
+        if len(remaining_idx) == 0 or labelled_mask.sum() >= budget:
+            result.max_uncertainties.append(float("nan"))
+            break
+
+        # Pool-wide peak uncertainty: the signal the convergence stop threshold watches.
+        remaining_pool = pool.iloc[remaining_idx]
+        if strategy == RANDOM_STRATEGY:
+            result.max_uncertainties.append(float("nan"))
+        else:
+            scores = uncertainty_score(model.predict_proba(remaining_pool), strategy)
+            result.max_uncertainties.append(float(scores.max()))
+
+        chosen_local = select_queries(
+            model,
+            remaining_pool,
+            batch_size,
+            strategy=strategy,
+            use_trigger=use_trigger,
+            random_state=int(rng.integers(0, 2**31 - 1)),
+        )
+        chosen_global = remaining_idx[chosen_local]
+
+        if record_queries:
+            for position in chosen_global:
+                row = pool.iloc[position]
+                result.queried_rows.append(
+                    {
+                        "iteration": iteration,
+                        "n_labels_before": int(labelled_mask.sum()),
+                        "zone": row[schema.ZONE],
+                        "month": int(row[schema.TIMESTAMP].month),
+                        "temperature": float(row[schema.TEMPERATURE]),
+                        "relative_humidity": float(row[schema.RELATIVE_HUMIDITY]),
+                        "comfort_class": row[sl.COMFORT_CLASS],
+                        "triggered": bool(triggers[position]),
+                    }
+                )
+
+        labelled_mask[chosen_global] = True
+        iteration += 1
 
     result.n_labels_used = int(labelled_mask.sum())
     logger.info(
-        "active learning: %d labels -> accuracy %.3f",
+        "active learning (%s): %d labels -> accuracy %.3f",
+        strategy,
         result.n_labels_used,
         result.accuracies[-1],
     )

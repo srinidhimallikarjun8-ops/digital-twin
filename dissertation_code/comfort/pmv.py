@@ -17,6 +17,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import numpy as np
+
 from dissertation_code import config
 
 
@@ -80,7 +82,7 @@ def pmv(
     for _ in range(150):
         xf = (xf + xn) / 2.0
         hcn = 2.38 * abs(100.0 * xf - taa) ** 0.25  # natural convection
-        hc = hcf if hcf > hcn else hcn
+        hc = max(hcn, hcf)
         xn = (p5 + p4 * hc - p2 * xf**4) / (100.0 + p3 * hc)
         if abs(xn - xf) <= 0.00015:
             break
@@ -96,6 +98,57 @@ def pmv(
 
     thermal_sensation = 0.303 * math.exp(-0.036 * m) + 0.028
     return thermal_sensation * (mw - hl1 - hl2 - hl3 - hl4 - hl5 - hl6)
+
+
+def pmv_series(
+    air_temperature,
+    relative_humidity,
+    clothing_insulation,
+    metabolic_rate: float = config.DEFAULT_METABOLIC_RATE,
+    air_velocity: float = config.DEFAULT_AIR_VELOCITY,
+) -> np.ndarray:
+    """Compute PMV row-wise with a *per-row* clothing insulation.
+
+    `pmv` fixes clo for the whole call, which cannot express clothing that varies with outdoor
+    conditions (see comfort/clothing.py, DD-017). This wrapper applies the scalar solver per row.
+
+    Not vectorised internally: the iterative clothing-surface-temperature solution is a scalar
+    fixed-point loop. Measured at ~3.5 s for the full 514k-row export, which is not a bottleneck
+    (the active-learning loop's cost is dominated by trigger recomputation and model fitting).
+
+    Args:
+        air_temperature: per-row dry-bulb temperature, deg C.
+        relative_humidity: per-row relative humidity, percent.
+        clothing_insulation: per-row clothing insulation, clo.
+        metabolic_rate: met, held constant (sedentary indoor).
+        air_velocity: m/s, held constant (still indoor air).
+
+    Returns:
+        Array of PMV values on the ASHRAE -3..+3 scale.
+    """
+    temperatures = np.asarray(air_temperature, dtype=float)
+    humidities = np.asarray(relative_humidity, dtype=float)
+    clo_values = np.asarray(clothing_insulation, dtype=float)
+
+    if not (len(temperatures) == len(humidities) == len(clo_values)):
+        raise ValueError(
+            "air_temperature, relative_humidity and clothing_insulation must be the same length"
+        )
+
+    return np.array(
+        [
+            pmv(
+                t,
+                rh,
+                assumptions=ComfortAssumptions(
+                    metabolic_rate=metabolic_rate,
+                    clothing_insulation=clo,
+                    air_velocity=air_velocity,
+                ),
+            )
+            for t, rh, clo in zip(temperatures, humidities, clo_values)
+        ]
+    )
 
 
 def is_comfortable(
